@@ -21,7 +21,6 @@ import sys
 import threading
 from queue import Empty
 import signal
-from tqdm import tqdm
 
 # Import untuk Electrum client yang lebih baik
 from aiorpcx import connect_rs, RPCError, TaskTimeout
@@ -36,42 +35,30 @@ LOW = 0x3da316fc3dfc61f38f7e832cb02759b2bb0be4359ad4c02ceac5e2de41c7a337
 HIGH = 0x6b60169b1d6f8f7f21207d4ff2d3575f8d3e73e6dd0b87cf86269c23ee6803f7
 
 # Performance tuning
-WORKERS_PER_CORE = 4
-QUEUE_SIZE = 50000
-BATCH_SIZE = 500
-MAX_CONCURRENT_BATCHES = 200
-BATCH_TIMEOUT = 15
-SERVER_TEST_TIMEOUT = 10
-REQUEST_TIMEOUT = 15
+WORKERS_PER_CORE = 4  # Increased from 2
+QUEUE_SIZE = 50000  # Increased from 10000
+BATCH_SIZE = 500  # Increased from 100 untuk throughput lebih tinggi
+MAX_CONCURRENT_BATCHES = 200  # Increased from 50
+BATCH_TIMEOUT = 15  # Timeout per batch in seconds
+SERVER_TEST_TIMEOUT = 10  # Reduced from 20
+REQUEST_TIMEOUT = 15  # Reduced from 30
 
 # Test addresses untuk verifikasi server
 TEST_ADDRESSES = [
-    "1111111111111111111114oLvT2",
-    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
-    "111111811zDiVJNrGoufFmZUdetqXMqV"
+    "1111111111111111111114oLvT2",  # Legacy address
+    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",  # Genesis address
+    "111111811zDiVJNrGoufFmZUdetqXMqV"  # Another test address
 ]
 
-# Daftar server Electrum yang stabil
+# Daftar server Electrum yang stabil (ditambah lebih banyak)
 ELECTRUM_SERVERS = [
-    {"host": "23.155.96.131", "port": 50002, "protocol": "ssl"},
     {"host": "electrum.blockstream.info", "port": 50002, "protocol": "ssl"},
+    {"host": "23.155.96.131", "port": 50002, "protocol": "ssl"},
     {"host": "blockstream.info", "port": 700, "protocol": "ssl"},
-    {"host": "ax101.blockeng.ch", "port": 60002, "protocol": "ssl"},
-    {"host": "bitcoin.grey.pw", "port": 50002, "protocol": "ssl"},
-    {"host": "116-255-5-183.ip4.superloop.au", "port": 50002, "protocol": "ssl"},
-    {"host": "btc.ocf.sh", "port": 50002, "protocol": "ssl"},
-    {"host": "165.22.98.208", "port": 50002, "protocol": "ssl"},
-    {"host": "34.128.68.204", "port": 50002, "protocol": "ssl"},
-    {"host": "34.50.93.134", "port": 50002, "protocol": "ssl"},
-    {"host": "electrum.emzy.de", "port": 50002, "protocol": "ssl"},
-    {"host": "electrum.bitaroo.net", "port": 50002, "protocol": "ssl"},
-    {"host": "electrum.coinucopia.io", "port": 50002, "protocol": "ssl"},
-    {"host": "electrum.qtornado.com", "port": 50002, "protocol": "ssl"},
-    {"host": "eai.bitcoiner.social", "port": 50002, "protocol": "ssl"},
 ]
 
 # ============================================================
-# UTILITY FUNCTIONS - SAMA SEPERTI SEBELUMNYA
+# [SEMUA FUNGSI UTILITY TETAP SAMA - BECH32, ADDRESS, DLL]
 # ============================================================
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -149,6 +136,7 @@ def generate_private_key():
     range_size = HIGH - LOW + 1
     candidate = LOW + secrets.randbelow(range_size)
     return hex(candidate)[2:].zfill(64)
+
 
 def private_key_to_WIF(private_key: str) -> str:
     var80 = "80" + private_key
@@ -249,7 +237,7 @@ def address_to_scripthash(address: str) -> str:
         raise ValueError(f"address_to_scripthash error for {address}: {e}")
 
 # ============================================================
-# ELECTRUM SERVER MANAGER - SAMA SEPERTI SEBELUMNYA
+# OPTIMIZED ELECTRUM SERVER MANAGER
 # ============================================================
 
 class ElectrumServerManager:
@@ -259,9 +247,9 @@ class ElectrumServerManager:
         self._ssl_context = self._create_ssl_context()
         self._server_stats = {}
         self._last_test_time = 0
-        self._test_interval = 300
+        self._test_interval = 300  # Test servers every 5 minutes
         self._lock = asyncio.Lock()
-        self._verified_servers = []
+        self._verified_servers = []  # Servers that passed the test addresses verification
 
     def _create_ssl_context(self):
         context = ssl.create_default_context()
@@ -307,13 +295,15 @@ class ElectrumServerManager:
             return False, float('inf')
 
     async def _verify_server_with_test_addresses(self, server):
+        """Verify server by checking known test addresses"""
         host, port = server["host"], server["port"]
         
         try:
             ssl_ctx = self._ssl_context
             
-            async with asyncio.timeout(SERVER_TEST_TIMEOUT * 2):
+            async with asyncio.timeout(SERVER_TEST_TIMEOUT * 2):  # Double timeout for verification
                 async with connect_rs(host, port, ssl=ssl_ctx) as session:
+                    # Test all test addresses
                     all_successful = True
                     results = {}
                     
@@ -329,31 +319,39 @@ class ElectrumServerManager:
                                 confirmed = response.get("confirmed", 0)
                                 unconfirmed = response.get("unconfirmed", 0)
                                 total = confirmed + unconfirmed
-                                results[address] = total / 100000000
+                                results[address] = total / 100000000  # Convert to BTC
                             else:
                                 all_successful = False
                                 break
-                        except Exception:
+                        except Exception as e:
+                            print(f"   ❌ Failed to check {address}: {str(e)[:50]}")
                             all_successful = False
                             break
                     
                     if all_successful:
+                        print(f"   ✅ Verification successful - All test addresses responded")
+                        print(f"      Balances: {', '.join([f'{addr[:10]}...: {results[addr]:.8f} BTC' for addr in TEST_ADDRESSES])}")
                         return True, results
                     else:
+                        print(f"   ❌ Verification failed - Some addresses didn't respond properly")
                         return False, None
                         
-        except Exception:
+        except Exception as e:
+            print(f"   ❌ Verification error: {str(e)[:50]}")
             return False, None
 
     async def get_fastest_servers(self, limit=3, verify=True):
+        """Get multiple fastest servers untuk load balancing, with optional verification"""
         async with self._lock:
             current_time = time.time()
             
+            # Test servers if needed
             if not self._healthy_servers or (current_time - self._last_test_time) > self._test_interval:
                 print("\n" + "=" * 80)
                 print("⚡ TESTING ELECTRUM SERVERS WITH VERIFICATION")
                 print("=" * 80)
                 
+                # First test speed
                 print("\n📊 Testing server speed...")
                 speed_tasks = [self._test_server_speed(server) for server in self.servers]
                 speed_results = await asyncio.gather(*speed_tasks, return_exceptions=True)
@@ -366,10 +364,12 @@ class ElectrumServerManager:
                     else:
                         print(f"   ❌ {server['host']}:{server['port']} - Failed speed test")
                 
+                # Sort by response time
                 healthy.sort(key=lambda x: x[1])
                 
                 if verify:
                     print("\n🔍 Verifying top servers with test addresses...")
+                    # Verify top 5 fastest servers
                     verified_servers = []
                     for server, response_time in healthy[:5]:
                         print(f"\n   Testing {server['host']}:{server['port']}...")
@@ -385,6 +385,7 @@ class ElectrumServerManager:
                         self._verified_servers = verified_servers
                         print(f"\n✅ Found {len(self._healthy_servers)} verified fast servers")
                         
+                        # Print summary
                         print("\n📋 VERIFIED SERVERS SUMMARY:")
                         for i, (server, resp_time) in enumerate(verified_servers[:limit]):
                             print(f"   {i+1}. {server['host']}:{server['port']} - {resp_time:.1f}ms")
@@ -399,19 +400,20 @@ class ElectrumServerManager:
             return self._healthy_servers
 
     async def get_verification_results(self):
+        """Get the results from the last verification test"""
         if self._verified_servers:
             return self._verified_servers
         return []
 
 # ============================================================
-# CONNECTION POOL - SAMA SEPERTI SEBELUMNYA
+# OPTIMIZED ELECTRUM CLIENT WITH CONNECTION POOLING
 # ============================================================
 
 class ConnectionPool:
     def __init__(self, max_connections=10):
         self.max_connections = max_connections
-        self._connections = {}
-        self._locks = {}
+        self._connections = {}  # {server_key: [connections]}
+        self._locks = {}  # {server_key: asyncio.Lock}
         self._ssl_context = ssl.create_default_context()
         self._ssl_context.check_hostname = False
         self._ssl_context.verify_mode = ssl.CERT_NONE
@@ -426,14 +428,17 @@ class ConnectionPool:
             if server_key not in self._connections:
                 self._connections[server_key] = []
             
+            # Try to get an existing connection
             if self._connections[server_key]:
                 conn = self._connections[server_key].pop()
                 try:
+                    # Test if connection is still alive
                     await conn.send_request("server.version", ["test", "1.4"])
                     return conn
                 except:
-                    pass
+                    pass  # Connection dead, create new
             
+            # Create new connection
             try:
                 conn = await connect_rs(host, port, ssl=self._ssl_context)
                 return conn
@@ -451,36 +456,33 @@ class ConnectionPool:
             else:
                 await conn.close()
 
-# ============================================================
-# ENHANCED ELECTRUM CLIENT - DENGAN PROGRESS BAR
-# ============================================================
-
 class EnhancedElectrumClient:
     def __init__(self):
         self.server_manager = ElectrumServerManager()
         self.connection_pool = ConnectionPool(max_connections=20)
         self.request_count = 0
         self.failed_requests = 0
-        self.MAX_CONCURRENT_REQUESTS = 200
+        self.MAX_CONCURRENT_REQUESTS = 200  # Increased
         self._request_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
         self.found_addresses = []
         self._batch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
         self.verified_servers = []
-        self.progress_bars = {}  # Dictionary untuk menyimpan progress bar per worker
 
     async def initialize(self):
         await self.server_manager.get_fastest_servers(limit=5, verify=True)
         self.verified_servers = await self.server_manager.get_verification_results()
         return self
 
-    async def batch_get_balance(self, addresses_with_keys: List[Tuple[str, str]], worker_id: int = 0) -> Dict[str, float]:
+    async def batch_get_balance(self, addresses_with_keys: List[Tuple[str, str]]) -> Dict[str, float]:
         if not addresses_with_keys:
             return {}
         
+        # Gunakan semaphore untuk membatasi concurrent batches
         async with self._batch_semaphore:
-            return await self._do_batch_get_balance(addresses_with_keys, worker_id)
+            return await self._do_batch_get_balance(addresses_with_keys)
 
-    async def _do_batch_get_balance(self, addresses_with_keys: List[Tuple[str, str]], worker_id: int) -> Dict[str, float]:
+    async def _do_batch_get_balance(self, addresses_with_keys: List[Tuple[str, str]]) -> Dict[str, float]:
+        # Convert to scripthashes dengan caching sederhana
         request_map = {}
         for pk, addr in addresses_with_keys:
             try:
@@ -492,23 +494,27 @@ class EnhancedElectrumClient:
         if not request_map:
             return {}
         
-        servers = await self.server_manager.get_fastest_servers(limit=3, verify=False)
+        # Dapatkan multiple servers untuk load balancing
+        servers = await self.server_manager.get_fastest_servers(limit=3, verify=False)  # Use cached results
         if not servers:
             return {addr: 0 for _, addr in addresses_with_keys}
         
+        # Split scripthashes ke multiple servers untuk parallel processing
         scripthash_items = list(request_map.items())
         chunk_size = max(1, len(scripthash_items) // len(servers))
         chunks = [scripthash_items[i:i + chunk_size] for i in range(0, len(scripthash_items), chunk_size)]
         
+        # Process chunks secara parallel
         tasks = []
         for i, chunk in enumerate(chunks):
             if chunk:
                 server = servers[i % len(servers)]
                 task = asyncio.create_task(
-                    self._process_chunk(server, chunk, worker_id)
+                    self._process_chunk(server, chunk)
                 )
                 tasks.append(task)
         
+        # Gabungkan results
         results = {}
         chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -516,20 +522,24 @@ class EnhancedElectrumClient:
             if isinstance(chunk_result, dict):
                 results.update(chunk_result)
         
+        # Fill missing addresses with 0
         for pk, addr in addresses_with_keys:
             if addr not in results:
                 results[addr] = 0
         
         return results
 
-    async def _process_chunk(self, server: dict, chunk: List[Tuple[str, Tuple[str, str]]], worker_id: int) -> Dict[str, float]:
+    async def _process_chunk(self, server: dict, chunk: List[Tuple[str, Tuple[str, str]]]) -> Dict[str, float]:
+        """Process a chunk of scripthashes on a specific server"""
         host, port = server["host"], server["port"]
         results = {}
         
         try:
+            # Get connection from pool
             session = await self.connection_pool.get_connection(host, port)
             
             try:
+                # Create tasks for each scripthash in chunk
                 tasks = []
                 scripthash_list = []
                 
@@ -541,34 +551,41 @@ class EnhancedElectrumClient:
                     )
                     tasks.append(task)
                 
+                # Wait for all tasks with overall timeout
                 batch_results = await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
                     timeout=BATCH_TIMEOUT
                 )
                 
+                # Process results
                 for i, (scripthash, addr) in enumerate(scripthash_list):
                     result = batch_results[i] if i < len(batch_results) else 0
-                    
+
                     if isinstance(result, (int, float)):
                         balance = float(result)
                         results[addr] = balance
                         if balance > 0:
                             pk = chunk[i][1][0]
                             self.found_addresses.append((pk, addr, balance))
-                            # Tampilkan hanya jika ditemukan balance > 0
-                            timestamp = datetime.now().strftime("%H:%M:%S")
-                            print(f"\n\033[92m💰 FOUND at {timestamp} | Worker {worker_id} | {addr} | Balance: {balance:.8f} BTC | PK: {pk[:16]}...\033[0m\n")
+
+                    elif isinstance(result, Exception):
+                        self.failed_requests += 1
+                        results[addr] = None  # ← beda dengan 0
+
                     else:
                         self.failed_requests += 1
-                        results[addr] = 0
+                        results[addr] = None
+   
                         
             finally:
+                # Return connection to pool
                 await self.connection_pool.return_connection(host, port, session)
                 
         except asyncio.TimeoutError:
-            for scripthash, (pk, addr) in chunk:
-                results[addr] = 0
-                self.failed_requests += 1
+            print("⚠ Batch timeout - partial results lost")
+            for task in tasks:
+                task.cancel()
+
         except Exception:
             for scripthash, (pk, addr) in chunk:
                 results[addr] = 0
@@ -578,15 +595,20 @@ class EnhancedElectrumClient:
 
     async def _safe_get_balance(self, session, scripthash, retries=3):
         delay = 0.5
+
         for attempt in range(retries):
             try:
                 return await self._get_single_balance(session, scripthash)
-            except Exception:
+
+            except Exception as e:
                 if attempt == retries - 1:
-                    return 0
+                    raise e  # gagal total
+
                 await asyncio.sleep(delay)
-                delay *= 2
+                delay *= 2  # exponential backoff
+
         return 0
+
 
     async def _get_single_balance(self, session, scripthash: str) -> float:
         async with self._request_semaphore:
@@ -605,39 +627,46 @@ class EnhancedElectrumClient:
                     total = confirmed + unconfirmed
                     return total / 100000000
 
-                return 0
-            except Exception:
-                return 0
+                raise ValueError("Invalid RPC response format")
+
+            except (asyncio.TimeoutError, TaskTimeout) as e:
+                raise e  # ← JANGAN return 0
+            except Exception as e:
+                raise e  # ← Propagate error
+
 
 # ============================================================
-# OPTIMIZED ASYNC WORKER DENGAN PROGRESS BAR
+# OPTIMIZED ASYNC WORKER
+# ============================================================
+
+# ============================================================
+# OPTIMIZED ASYNC WORKER - DENGAN FORMAT TABEL
 # ============================================================
 
 async def batch_worker(worker_id: int, queue: Queue, stats_queue: Queue):
-    """Async worker dengan progress bar tqdm"""
+    """Async worker dengan format tabel untuk semua address"""
     print(f"🚀 Async Worker {worker_id} started")
     
+    # Initialize enhanced client
     client = EnhancedElectrumClient()
     await client.initialize()
     
+    # Statistics
     checked_count = 0
     found_count = 0
     start_time = time.time()
     last_stats_time = time.time()
     
+    # Buffer untuk batch
     batch_buffer = []
     
-    # Buat progress bar untuk worker ini
-    pbar = tqdm(
-        desc=f"Worker {worker_id}",
-        unit="addr",
-        position=worker_id,
-        leave=False,
-        ncols=100,
-        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]"
-    )
+    # Tampilkan header tabel sekali di awal
+    print("\n" + "=" * 110)
+    print(f"{'TIME':<10} | {'WORKER':<6} | {'STATUS':<8} | {'BITCOIN ADDRESS':<42} | {'BALANCE':<14} | {'PRIVATE KEY (first 16)':<16}")
+    print("=" * 110)
     
     while True:
+        # Collect batch dengan non-blocking get
         try:
             while len(batch_buffer) < BATCH_SIZE:
                 item = queue.get_nowait()
@@ -649,20 +678,24 @@ async def batch_worker(worker_id: int, queue: Queue, stats_queue: Queue):
             await asyncio.sleep(0.01)
             continue
         
+        # Process batch
         current_batch = batch_buffer[:BATCH_SIZE]
         batch_buffer = batch_buffer[BATCH_SIZE:]
         
-        # Update total untuk progress bar
-        pbar.total = checked_count + len(current_batch)
+        # Check batch
+        results = await client.batch_get_balance(current_batch)
         
-        # Process batch
-        results = await client.batch_get_balance(current_batch, worker_id)
-        
-        # Process results
+        # Process results dan tampilkan SEMUA address
         for pk, addr in current_batch:
             checked_count += 1
-            balance = results.get(addr, 0)
+            balance = results.get(addr)
+            if balance is None:
+                print("⚠ RPC ERROR")
+                continue
+
+            timestamp = datetime.now().strftime("%H:%M:%S")
             
+            # Tampilkan SEMUA address dengan format tabel
             if balance > 0:
                 found_count += 1
                 wif = private_key_to_WIF(pk)
@@ -670,62 +703,61 @@ async def batch_worker(worker_id: int, queue: Queue, stats_queue: Queue):
                 # Save to file
                 with open("found.txt", "a") as f:
                     f.write(
-                        f"=== FOUND {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                        f"=== FOUND {timestamp} ===\n"
                         f"Address: {addr}\n"
                         f"Private Key: {pk}\n"
                         f"WIF: {wif}\n"
                         f"Balance: {balance:.8f} BTC\n"
-                        f"Worker: {worker_id}\n"
                         f"==================\n\n"
                     )
-            
-            # Update progress bar
-            pbar.update(1)
-            
-            # Update description dengan rate dan found count
-            if checked_count % 100 == 0:
-                elapsed = time.time() - start_time
-                rate = checked_count / elapsed if elapsed > 0 else 0
-                pbar.set_description(f"Worker {worker_id} [Found: {found_count}]")
+                
+                # Tampilkan FOUND dengan highlight hijau
+                print(f"\033[92m{timestamp:<10} | {worker_id:6d} | 💰 FOUND  | {addr:<42} | {balance:14.8f} | {pk[:16]:<16}\033[0m")
+            else:
+                # Tampilkan EMPTY dengan warna normal
+                print(f"{timestamp:<10} | {worker_id:6d} | ❌ EMPTY  | {addr:<42} | {0:14.8f} | {pk[:16]:<16}")
         
-        # Periodic statistics (tanpa mengganggu progress bar)
+        # Periodic statistics (dengan pemisah yang jelas)
         current_time = time.time()
-        if current_time - last_stats_time >= 30:
+        if current_time - last_stats_time >= 10:  # Stats every 10 seconds
             elapsed = current_time - start_time
             rate = checked_count / elapsed if elapsed > 0 else 0
             queue_size = queue.qsize()
             
-            # Tampilkan stats di atas progress bar
-            tqdm.write(f"\n📊 WORKER {worker_id} STATS | Checked: {checked_count:,} | Found: {found_count} | Rate: {rate:.1f} addr/sec | Queue: {queue_size}")
+            print("-" * 110)
+            print(f"📊 WORKER {worker_id} STATS: Checked: {checked_count:,} | Found: {found_count} | Rate: {rate:.1f} addr/sec | Queue: {queue_size}")
+            print("-" * 110)
             
             last_stats_time = current_time
-    
-    pbar.close()
 
 # ============================================================
-# PRODUCER - OPTIMIZED
+# PRODUCER OPTIMIZED
 # ============================================================
 
 def producer(queue):
-    """Producer dengan multiple threads"""
+    """Producer dengan multiple threads untuk generate address lebih cepat"""
     print("🟡 Producer started with multiple threads", flush=True)
     
     def generate_worker(worker_id, local_queue):
+        """Worker thread untuk generate address"""
         local_counter = 0
         while True:
             pk = generate_private_key()
             pub = private_key_to_public_key(pk)
             addr = public_key_to_address(pub)
             
+            # Try to put dengan timeout
             try:
                 local_queue.put((pk, addr), timeout=1)
                 local_counter += 1
                 
                 if local_counter % 10000 == 0:
-                    tqdm.write(f"📈 Producer Thread-{worker_id} Generated {local_counter:,} addresses")
+                    print(f"📈 Thread-{worker_id} Generated {local_counter:,} addresses", flush=True)
             except:
+                # Queue full, sleep sebentar
                 time.sleep(0.1)
     
+    # Start multiple generator threads
     num_generators = max(4, multiprocessing.cpu_count())
     threads = []
     
@@ -734,6 +766,7 @@ def producer(queue):
         thread.start()
         threads.append(thread)
     
+    # Keep main thread alive
     try:
         while True:
             time.sleep(1)
@@ -750,11 +783,16 @@ async def test_servers_only():
     print("🧪 TESTING ELECTRUM SERVERS WITH SPECIFIED ADDRESSES")
     print("=" * 80)
     
+    # Test addresses
     print(f"\n📋 Test Addresses:")
     for i, addr in enumerate(TEST_ADDRESSES):
         print(f"   {i+1}. {addr}")
     
+    # Create server manager
     server_manager = ElectrumServerManager()
+    
+    # Get verified servers
+    print("\n🔍 Starting server verification...")
     verified_servers = await server_manager.get_fastest_servers(limit=5, verify=True)
     
     if verified_servers:
@@ -763,11 +801,37 @@ async def test_servers_only():
         print("=" * 80)
         print(f"\n📊 Found {len(verified_servers)} verified servers:")
         
+        # Get detailed verification results
         verification_results = await server_manager.get_verification_results()
         
         for i, (server, resp_time) in enumerate(verification_results[:5]):
             print(f"\n   Server {i+1}: {server['host']}:{server['port']}")
             print(f"   Response Time: {resp_time:.1f}ms")
+            
+            # Test each address individually on this server
+            print(f"   Test Address Balances:")
+            
+            ssl_ctx = server_manager._ssl_context
+            try:
+                async with connect_rs(server['host'], server['port'], ssl=ssl_ctx) as session:
+                    for addr in TEST_ADDRESSES:
+                        try:
+                            scripthash = address_to_scripthash(addr)
+                            response = await session.send_request(
+                                "blockchain.scripthash.get_balance", 
+                                [scripthash]
+                            )
+                            if isinstance(response, dict):
+                                confirmed = response.get("confirmed", 0)
+                                unconfirmed = response.get("unconfirmed", 0)
+                                total = (confirmed + unconfirmed) / 100000000
+                                print(f"      {addr[:15]}...: {total:.8f} BTC")
+                            else:
+                                print(f"      {addr[:15]}...: Failed to get balance")
+                        except Exception as e:
+                            print(f"      {addr[:15]}...: Error - {str(e)[:30]}")
+            except Exception as e:
+                print(f"   ❌ Failed to connect: {str(e)[:50]}")
     else:
         print("\n❌ No servers could be verified!")
     
@@ -781,16 +845,20 @@ async def test_servers_only():
 def run_async_workers(num_workers: int, queue: Queue, stats_queue: Queue):
     """Run async workers in a separate process"""
     try:
+        # Set signal handlers
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         
+        # Create new event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
+        # Apply nest_asyncio
         try:
             nest_asyncio.apply(loop)
         except:
             pass
         
+        # Run main async function
         loop.run_until_complete(main_async(num_workers, queue, stats_queue))
         loop.close()
     except Exception as e:
@@ -798,14 +866,17 @@ def run_async_workers(num_workers: int, queue: Queue, stats_queue: Queue):
 
 async def main_async(num_workers: int, queue: Queue, stats_queue: Queue):
     """Main async function"""
+    # Create tasks dengan pengaturan yang lebih baik
     tasks = []
     for i in range(num_workers):
         task = asyncio.create_task(batch_worker(i, queue, stats_queue))
         tasks.append(task)
     
+    # Wait for all tasks with proper cleanup
     try:
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
+        # Cancel all tasks on shutdown
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -813,11 +884,13 @@ async def main_async(num_workers: int, queue: Queue, stats_queue: Queue):
 
 def main():
     """Main entry point"""
+    # Apply nest_asyncio di main thread
     try:
         nest_asyncio.apply()
     except:
         pass
     
+    # Run server test first
     print("\n" + "=" * 80)
     print("🔧 INITIALIZING BITCOIN PUZZLE 160 SOLVER")
     print("=" * 80)
@@ -840,15 +913,20 @@ def main():
     num_workers = cpu_count * WORKERS_PER_CORE
     
     print("\n" + "=" * 80)
-    print("🚀 BITCOIN PUZZLE 160 SOLVER - OPTIMIZED WITH PROGRESS BAR")
+    print("🚀 BITCOIN PUZZLE 160 SOLVER - ULTRA HIGH PERFORMANCE")
+    print("=" * 80)
+    print("🔥 OPTIMIZED VERSION with Connection Pooling & Load Balancing")
     print("=" * 80)
     print(f"🔥 CPU Cores: {cpu_count}")
     print(f"🔥 Async Workers: {num_workers}")
     print(f"🔥 Producer Threads: {max(4, cpu_count)}")
     print(f"🔥 Batch Size: {BATCH_SIZE} addresses/request")
     print(f"🔥 Max Concurrent Batches: {MAX_CONCURRENT_BATCHES}")
+    print(f"🔥 Connection Pool Size: 20 per server")
+    print(f"🔥 Key Range: {hex(LOW)} - {hex(HIGH)}")
     print("=" * 80)
     
+    # Create queue dengan size lebih besar
     queue = Queue(maxsize=QUEUE_SIZE)
     stats_queue = Queue()
     
@@ -858,13 +936,10 @@ def main():
     producer_process.start()
     
     # Start async workers
-    num_processes = max(1, cpu_count)
+    num_processes = max(1, cpu_count)  # Use all cores
     workers_per_process = max(1, num_workers // num_processes)
     
     print(f"📦 Creating {num_processes} processes with {workers_per_process} async workers each")
-    print("\n" + "=" * 80)
-    print("📊 PROGRESS MONITORING (Only shows found addresses + stats)")
-    print("=" * 80 + "\n")
     
     processes = []
     for i in range(num_processes):
@@ -876,45 +951,38 @@ def main():
         p.start()
         processes.append(p)
     
-    # Monitor with tqdm for system stats
+    # Monitor dengan update lebih sering
     try:
         last_queue_size = 0
         stuck_count = 0
         
-        # Buat progress bar untuk system stats
-        system_pbar = tqdm(
-            desc="System",
-            unit="addr",
-            position=num_workers,
-            leave=True,
-            ncols=100,
-            bar_format="{desc}: {n_fmt} in queue | {rate_fmt}"
-        )
-        
         while True:
-            time.sleep(2)
+            time.sleep(2)  # Check every 2 seconds
             queue_size = queue.qsize()
             
-            # Update system progress bar
-            system_pbar.n = queue_size
-            system_pbar.refresh()
-            
+            # Deteksi jika queue stuck
             if queue_size == last_queue_size:
                 stuck_count += 1
-                if stuck_count >= 5:
-                    tqdm.write(f"\n⚠️  WARNING: Queue stuck at {queue_size}. Workers might be too slow!")
+                if stuck_count >= 5:  # Stuck for 10 seconds
+                    print(f"\n⚠️  WARNING: Queue stuck at {queue_size}. Workers might be too slow!")
+                    print(f"   Try reducing BATCH_SIZE or increasing workers.")
                     stuck_count = 0
             else:
                 stuck_count = 0
             
             last_queue_size = queue_size
             
+            # Tampilkan status
+            print(f"\n📊 System Status - Queue: {queue_size}/{QUEUE_SIZE} | "
+                  f"Processes: {len(processes)} | "
+                  f"Usage: {queue_size/QUEUE_SIZE*100:.1f}%")
+            
+            # Jika queue hampir penuh, beri warning
             if queue_size > QUEUE_SIZE * 0.9:
-                tqdm.write(f"⚠️  Queue nearly full ({queue_size}/{QUEUE_SIZE})!")
+                print(f"⚠️  Queue nearly full! Workers can't keep up!")
                 
     except KeyboardInterrupt:
         print("\n\n🛑 Shutting down...")
-        system_pbar.close()
         for p in processes:
             p.terminate()
         producer_process.terminate()
